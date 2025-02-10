@@ -1,0 +1,6 @@
+from .mnist import get_mnist_loaders
+from .cifar10 import get_cifar10_loaders
+from .cifar10 import get_cifar10_loaders_divide, get_cifar10_loaders_sub
+from .cifar100 import get_cifar100_loaders
+from .svhn import get_svhn_loaders_sub
+from .tinyimagenet import get_tiny_imagenet_loaders_sub, get_tiny_imagenet_half_loaders_sub, get_tiny_imagenet_quar_loaders_sub

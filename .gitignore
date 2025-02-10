@@ -1,0 +1,34 @@
+# Datasets
+data/
+datasets/
+*.csv
+*.tsv
+*.txt
+*.json
+*.npy
+*.mat
+
+# Model checkpoints/ trigger
+saved/
+*.pkl
+*.pt
+
+# Temporary files/build artifacts
+__pycache__/
+
+# Virtual environment
+.venv/
+venv/
+env/
+myenv/
+
+# Logs
+logs/
+*.log
+
+# Large files
+*.zip
+*.tar.gz
+*.gz
+*.rar
+
