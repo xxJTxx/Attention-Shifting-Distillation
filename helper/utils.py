@@ -8,7 +8,7 @@ from models.nets import CNNCifar, CNNMnist, CNNCifar100
 from models.resnet import resnet18
 from models.vit import deit_tiny_patch16_224
 from tqdm import tqdm
-from loaders import get_cifar10_loaders, get_cifar100_loaders, get_svhn_loaders_sub, get_mnist_loaders,get_cifar10_loaders_sub, get_tiny_imagenet_half_loaders_sub, get_tiny_imagenet_loaders_sub, get_tiny_imagenet_quar_loaders_sub
+from loaders import get_cifar100_loaders, get_svhn_loaders_sub, get_cifar10_loaders_sub, get_tiny_imagenet_half_loaders_sub, get_tiny_imagenet_loaders_sub, get_tiny_imagenet_quar_loaders_sub
 
 
 def get_model(args, dataset):
