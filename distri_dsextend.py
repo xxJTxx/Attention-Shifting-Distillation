@@ -7,14 +7,17 @@ import logging
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-from helper.utils import get_model, test_trigger_accuracy, test, draw_curve, get_loader
+from helper.utils import get_model, test_trigger_accuracy, test, draw_curve
 from torch.optim.lr_scheduler import StepLR
+from loaders import get_cifar10_loaders_sub, get_cifar100_loaders, get_svhn_loaders_sub, get_tiny_imagenet_loaders_sub, get_tiny_imagenet_half_loaders_sub, get_tiny_imagenet_quar_loaders_sub
 
+
+
+""" This code is for conccatenate Cifar100 training and testing set into a bigger defense dataset """
 
 THE_CUDA = 0
 DEVICE = torch.device(f"cuda:{THE_CUDA}" if torch.cuda.is_available() else "cpu")
 warnings.filterwarnings('ignore')
-
 
 def args_parser():
     parser = argparse.ArgumentParser()
@@ -52,6 +55,14 @@ def args_parser():
     return args
 
 """ Knowledge Distillation Loss and Attention Shifting Loss """
+def adjust_learning_rate(optimizer, loss):
+    # Sets the learning rate to 0.0001 once loss reach 1.0
+    if loss < 1.0 :
+        lr_new = 0.001
+        print(f"lr change to {lr_new} when loss <= 1.0")
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr_new
+
 # Knowledge Distillation Loss    
 def loss_fn_kd(outputs, labels, teacher_outputs, alpha, temperature):
     device = DEVICE
@@ -67,13 +78,13 @@ def loss_fn_kd(outputs, labels, teacher_outputs, alpha, temperature):
 
     return KD_loss
 
-# Custom Loss function: Attention Shifting Loss
-def custom_loss1(water_model, train_model, eps = 1e-1):
+# Custom Loss function
+def custom_loss1(water_model, train_model, eps=1e-1):
         # Denominator take abs value to maintain the sign
         w_denominator=torch.abs(water_model.detach())
         t_denominator=torch.abs(train_model.detach()) 
         
-        # Creating a new tensor where negative/positive values are changed to -1/1, wheras 0 becomes 0+epsilon
+        # Creating a new tensor where negative/positive values are changed to -1/1, wheras 0 becomes 0 + eps
         water_one = torch.FloatTensor(water_model.size()).type_as(water_model)
         mask_w = water_model!=0
         water_one[mask_w] = water_model[mask_w]/w_denominator[mask_w]
@@ -92,16 +103,57 @@ def custom_loss1(water_model, train_model, eps = 1e-1):
 
         return torch.mean(torch.pow((1 + water_one*train_one), 2))
 
-
 """ Training loop for Attention Shifting Distillation """
 def attention_shifting_distillation(dataset, subset_rate, train_model, water_model, optimizer, device, response, mask, trigger, num_epochs=50, new_loss_r=0, default_loss_r=1, main_loss='CE', layer_output=None, layer_input=None, hook_layer=None, alpha = 0.9, temprature = 20, output_dir=None, thresh=0.0, finedata=None, in_out='in', lr_s=None):
     
     for epoch in range(num_epochs):
         
         if epoch == 0:
-            # Generate loader based on the (ADBA) training dataset, (ASD) defense dataset, subset rate of defense dataset
-            # in_out: 'in' for in distribution defense, 'out' for out of distribution defense 
-            train_loader, val_loader, test_loader = get_loader(dataset, subset_rate, in_out, finedata=finedata)
+            
+            # Generate val/test loader based on dataset used to train model, train loader is also created for in distribution finetune
+            if dataset == 'cifar10':
+                train_loader, val_loader, test_loader = get_cifar10_loaders_sub(subset_rate)
+            elif dataset == 'cifar100':
+                train_loader, val_loader, test_loader = get_cifar100_loaders()
+            elif dataset == 'svhn':
+                train_loader, val_loader, test_loader = get_svhn_loaders_sub(subset_rate)
+            elif dataset == 'tiny':
+                train_loader, val_loader, test_loader = get_tiny_imagenet_loaders_sub(subset_rate)
+            elif dataset == 'tinyhalf':
+                train_loader, val_loader, test_loader = get_tiny_imagenet_half_loaders_sub(subset_rate)
+            elif dataset == 'tinyquar':
+                train_loader, val_loader, test_loader = get_tiny_imagenet_quar_loaders_sub(subset_rate, distribution=in_out)
+            else:
+                raise ValueError("Chosen dataset not implemented !!!")
+                
+            
+            # Generate train loader for out of distribution finetune                
+            if in_out == 'out':
+                if finedata is None:
+                    raise ValueError("You should specify the OOD dataset for training")
+                else:  # Overwrite train loader for OOD data finetune
+                    if finedata == 'cifar10':
+                        train_loader, _, _ = get_cifar10_loaders_sub(subset_rate)
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    elif finedata == 'cifar100':
+                        train_loader1, _, train_loader2 = get_cifar100_loaders(subset_rate, data_extend=True)
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    elif finedata == 'svhn':
+                        train_loader, _, _ = get_svhn_loaders_sub(subset_rate)
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    elif finedata == 'tiny':
+                        train_loader, _, _ = get_tiny_imagenet_loaders_sub(subset_rate)
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    elif finedata == 'tinyhalf':
+                        train_loader, _, _ = get_tiny_imagenet_half_loaders_sub(subset_rate)
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    elif finedata == 'tinyquar':
+                        logging.info(f"Using OOD data: {finedata} for training")
+                    else:
+                        raise ValueError("Chosen dataset not implemented !!!")            
+            
+            logging.info(f"Total batch size: {len(train_loader1)} + {len(train_loader2)}")
+            
             
             # Record accuaracy after every epoch
             water_test_acc = []
@@ -120,6 +172,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
             lowest_performance = []
             update_flag = False
             
+            
             if layer_output is not None:
                 # Record the input of every hooked layer
                 water_relu = []
@@ -137,7 +190,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
                         nonlocal train_relu
                         train_relu.append(output) 
 
-                # Hook the function onto conv1 and conv2 of layer1~layer4 of both models.                
+                # Hook the function onto conv1 and conv2 of layer1~layer4 of both models.
                 for layer,_ in water_model.named_children():
                     if layer in hook_layer:
                         s = getattr(water_model, layer)
@@ -171,7 +224,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
                     if hook_flag:
                         nonlocal train_relu1
                         train_relu1.append(input)
-                # Hook the function onto conv1 and conv2 of layer1~layer4 of both models.           
+                # Hook the function onto conv1 and conv2 of layer1~layer4 of both models.
                 for layer,_ in water_model.named_children():
                     if layer in hook_layer:
                         s = getattr(water_model, layer)
@@ -211,7 +264,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
         ave_neu_loss_per_epoch = 0.0
         ave_task_loss_per_epoch = 0.0
                 
-        for batch_idx, batch in enumerate(train_loader):
+        for batch_idx, batch in enumerate(train_loader1):
             
             hook_flag = True
             # Reset the lists
@@ -255,7 +308,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
             - 'KD': Knowledge Distillation loss with the attacked model
             - 'CEtrue': Cross Entropy loss with the true label of the training set
             - 'CEwater': Cross Entropy loss with the output of the attacked model
-            """              
+            """     
             if main_loss == 'KD':
                 kd_loss = loss_fn_kd(outputs, labels, outputs_water, alpha=alpha, temperature=temprature)
             elif main_loss == 'CEtrue':
@@ -265,32 +318,96 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
                 kd_loss = F.cross_entropy(outputs, outputs_water_hard)
             else:
                 raise ValueError("main_loss should be 'KD', 'CEtrue' or 'CEwater'")
-              
-            
+           
             # Combine both losses
             # When default_loss_r is passed in with fixed value
             if not callable(default_loss_r):
                 loss_mul = 1
-                loss = loss_mul*((default_loss_r)*kd_loss + (new_loss_r)*(new_loss))    
+                loss = loss_mul*((default_loss_r)*kd_loss + (new_loss_r)*(new_loss))
             # When default_loss_r is passed in with non_fixed ratio (new_loss_r will be replaced with the number calculated below and ignore what was passing into this function)
             else:
                 loss_mul = 10 if epoch <20 else 20
                 loss = loss_mul*(1*(default_loss_r(epoch))*kd_loss + (1-default_loss_r(epoch))*(new_loss))
-                
+           
             ave_neu_loss_per_epoch += new_loss.item()
             ave_task_loss_per_epoch += kd_loss.item()
             
             loss.backward()
             optimizer.step()
 
+        for batch_idx, batch in enumerate(train_loader2):
+            
+            hook_flag = True
+            # Reset the lists
+            water_relu = []
+            train_relu = []
+            water_relu1 = []
+            train_relu1 = []
+            
+            optimizer.zero_grad()
+            images = batch[0]
+            labels = batch[1].long()         
+            images, labels = images.to(device), labels.to(device)
+            
+            train_model.train()
+            water_model.eval() 
+            
+            outputs = train_model(images)
+            with torch.no_grad():
+                outputs_water = water_model(images) 
+            
+            # For checking hook functions work correctly
+            if layer_input and layer_output:
+                if not water_relu and not train_relu:
+                    raise RuntimeError("No value stored in water_relu and train_relu. Check your hook registrations.")
+                elif len(water_relu) != len(train_relu):
+                    raise RuntimeError(f"Length of water_relu {len(water_relu)} and train_relu {len(train_relu)} should be equal. Check your hook registrations.")
+                
+                if not water_relu1 and not train_relu1:
+                    raise RuntimeError("No value stored in water_relu1 and train_relu1. Check your hook registrations.")
+                elif len(water_relu1) != len(train_relu1):
+                    raise RuntimeError(f"Length of water_relu1 {len(water_relu1)} and train_relu1 {len(train_relu1)} should be equal. Check your hook registrations.")    
+            
+             # Reset new_loss
+            new_loss = 0.0
+            # Sum up the loss of conv1 and conv2 of layer1~layer4 of both models
+            for idx in range(len(water_relu)):
+                new_loss += custom_loss1(water_relu[idx][0].detach(), train_relu[idx][0]) / len(water_relu)
+                       
+            if main_loss == 'KD':
+                kd_loss = loss_fn_kd(outputs, labels, outputs_water, alpha=alpha, temperature=temprature)
+            elif main_loss == 'CEtrue':
+                kd_loss = F.cross_entropy(outputs, labels)
+            elif main_loss == 'CEwater':
+                outputs_water_hard = outputs_water.topk(1, dim=1).indices.squeeze()
+                kd_loss = F.cross_entropy(outputs, outputs_water_hard)
+            else:
+                raise ValueError("main_loss should be 'KD', 'CEtrue' or 'CEwater'")
+           
+            # Combine both losses
+            # When default_loss_r is passed in with fixed value
+            if not callable(default_loss_r):
+                loss_mul = 1
+                loss = loss_mul*((default_loss_r)*kd_loss + (new_loss_r)*(new_loss))
+            # When default_loss_r is passed in with non_fixed ratio (new_loss_r will be replaced with the number calculated below and ignore what was passing into this function)
+            else:
+                loss_mul = 10 if epoch <20 else 20
+                loss = loss_mul*(1*(default_loss_r(epoch))*kd_loss + (1-default_loss_r(epoch))*(new_loss))
+            
+            ave_neu_loss_per_epoch += new_loss.item()
+            ave_task_loss_per_epoch += kd_loss.item()
+            
+            loss.backward()
+            optimizer.step()
+        
         if callable(default_loss_r):
             print(f"Non-fixed loss ratio: {default_loss_r(epoch)}:{1-default_loss_r(epoch)}")
         else:
             print(f"Fixed ratio: {default_loss_r}:{new_loss_r}")
         
         if epoch % 1 == 0:    
-            ave_task_loss_per_epoch /= len(train_loader)
-            ave_neu_loss_per_epoch /= len(train_loader)
+            ave_task_loss_per_epoch /= (len(train_loader1)+len(train_loader2))
+            ave_neu_loss_per_epoch /= (len(train_loader1)+len(train_loader2))
             neuron_loss_after_epoch.append(round(ave_neu_loss_per_epoch,4))
             task_loss_after_epoch.append(round(ave_task_loss_per_epoch,4))
             
@@ -298,7 +415,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
             if epoch == 0:
                 neuron_loss_after_epoch.append(round(ave_neu_loss_per_epoch,4))
                 task_loss_after_epoch.append(round(ave_task_loss_per_epoch,4))
-                
+            
             # After 50 epochs, record when the lowest main loss happens
             if epoch > 50:
                 if round(ave_task_loss_per_epoch,4) < lowest_main_loss:
@@ -307,6 +424,7 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
                     update_flag = True
         
         lr_s.step()
+        adjust_learning_rate(opt, ave_task_loss_per_epoch)
                     
         # Validate the model
         print("Validation Process...")
@@ -353,12 +471,12 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
     w_hooks1=[]
     t_hooks1=[]
     
-    draw_curve(neuron_loss_after_epoch, task_loss_after_epoch, acc, poison, main_ratio, output_dir)
+    draw_curve(neuron_loss_after_epoch,task_loss_after_epoch, acc, poison, main_ratio, output_dir)
     
     print('===============================Finished Training===============================')
     print('===============================Finished Training===============================')
-    print('===============================Finished Training===============================')  
-    
+    print('===============================Finished Training===============================')
+        
     a = int(len(neuron_loss_after_epoch)/21)
         
     logging.info(f"Neuron loss after every epoch:")
@@ -378,12 +496,12 @@ def attention_shifting_distillation(dataset, subset_rate, train_model, water_mod
 
 if __name__ == '__main__':
     args = args_parser()
-        
-    # Designate directory for reading the ADBA model, mask and trigger
+    
+    # Create directory for reading the ADBA model, mask and trigger
     read_dir = f'./saved/{args.dataset}_res_100_0.4_0.3_0_norm1clamp03/pretrain'
     
     """ Create directory for saving """
-    # The poison label used in ADBA training
+    # Create directory for saving
     label_string = f"l{args.target_label}"
     # (Optional) The threshold value for mask, value of mask under threshold will be set to 0 decreasing the overall trigger size(pixels)
     thresh_percent = f"thresh{int(args.thresh_mask*100)}"
@@ -399,7 +517,7 @@ if __name__ == '__main__':
     else:
         task = 'from_scratch'
 
-    exp_name = f"{exp_name}_ep{args.eps}_ds{args.subset_rate}_{args.msg}"   
+    exp_name = f"{exp_name}_ep{args.eps}_ds{args.subset_rate}_dataextend_lrdrop_{args.msg}"   
     output_dir = os.path.join(f'{read_dir}/hyperpara/{thresh_percent}/{args.finetune_in_out}/{the_trainset}/{task}/{args.main_loss_type}', exp_name)
     
     if not os.path.exists(output_dir):
@@ -450,7 +568,7 @@ if __name__ == '__main__':
         train_model.load_state_dict(local_weights[0])
     else:
         logging.info("Start with initialed weight")
-    
+       
     # Load the optimizer from checkpoint
     if args.opt_type == 'SGD':
         opt = torch.optim.SGD(train_model.parameters(), lr=args.opt_lr, momentum=args.opt_mo)
@@ -460,14 +578,15 @@ if __name__ == '__main__':
         lr_s = StepLR(opt, step_size=args.lr_step, gamma=args.lr_gamma)
     else:
         raise ValueError("Choose between Adam or SGD for optimizer.")
-     
+            
     # Start training
     train_test_acc, train_query_acc, water_test_acc, water_query_acc = attention_shifting_distillation(
         args.dataset, 
         args.subset_rate, 
         train_model, 
         water_model, 
-        opt, args.device, 
+        opt, 
+        args.device, 
         args.target_label, 
         mask, 
         trigger, 
@@ -481,12 +600,12 @@ if __name__ == '__main__':
         args.alpha_kl, 
         args.temperature, 
         output_dir, 
-        args.hresh_mask, 
+        args.thresh_mask, 
         args.finetunedata, 
         args.finetune_in_out, 
         lr_s)
     
-    """ Write in results """    
+    """ Write the result """
     b = int(len(train_test_acc)/9)
     b1 = len(train_test_acc)%9
       
@@ -494,7 +613,7 @@ if __name__ == '__main__':
         logging.info(f"===============================Training on {args.subset_rate} of {the_trainset} with {args.main_loss_type}/new loss ratio {args.main_loss_ratio}/{args.new_loss_ratio} and opt {args.opt_type} for {args.epoch} epochs.===============================")    
     elif args.ratio_type == "scheduler":
         logging.info(f"===============================Training on {args.subset_rate} of {the_trainset} with non-fixed ratio on {args.main_loss_type} and opt {args.opt_type} for {args.epoch} epochs.===============================")
-    logging.info(f"Defense model Test Acc: [Epoch, Acc, Asr]")
+    logging.info(f"Defense model Test Acc:")
     for idx in range(b):
         logging.info(train_test_acc[idx*9:idx*9+9])
     logging.info(train_test_acc[b*9:])
@@ -517,6 +636,5 @@ if __name__ == '__main__':
     logging.info(f"Epsilon in ASL: {args.eps}")
     logging.info(f"Directory: {output_dir}")
     logging.info(f"###############################################################################")
-    
     
     
